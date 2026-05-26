@@ -10,9 +10,9 @@ set -e
 PROJECT_ID=$(gcloud config get-value project)
 REGION="asia-southeast1"
 ZONE="${REGION}-a"
-CLUSTER_NAME="cis-demo-cluster"
-NETWORK="cis-demo-net"
-SUBNET="cis-demo-subnet"
+CLUSTER_NAME="cos-cis-cluster"
+NETWORK="cos-cis-net"
+SUBNET="cos-cis-subnet"
 
 echo -e "\e[1;34m[1/8] Enabling required Google Cloud APIs...\e[0m"
 gcloud services enable container.googleapis.com compute.googleapis.com
