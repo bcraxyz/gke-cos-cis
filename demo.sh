@@ -200,13 +200,17 @@ print_summary "$RAW_ENFORCED" "$LOADED_L2"
 # ==============================================================================
 read -p $'\e[1;32mPress [ENTER] to remove the logging opt-out and demonstrate granular control...\e[0m'
 
+echo -e "\e[1;34mStarting fluent-bit daemon to satisfy OS dependencies...\e[0m"
+# We MUST start fluent-bit first, otherwise Google's configure.sh auto-skips the check!
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- systemctl start fluent-bit
+
 echo -e "\e[1;34mModifying /etc/cis-scanner/env_vars to remove logging exclusion...\e[0m"
-# SAFE SED: Removes the string without leaving orphaned commas that crash the scanner
-kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- bash -c "
-  sed -i 's/,logging-service-running//g' /etc/cis-scanner/env_vars &&
-  sed -i 's/logging-service-running,//g' /etc/cis-scanner/env_vars &&
-  sed -i 's/logging-service-running//g' /etc/cis-scanner/env_vars
-"
+# Run sed sequentially and directly to ensure clean execution without bash quote conflicts
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- sed -i 's/logging-service-running//g' /etc/cis-scanner/env_vars
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- sed -i 's/,,/,/g' /etc/cis-scanner/env_vars
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- sed -i 's/=,/=/g' /etc/cis-scanner/env_vars
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- sed -i 's/,\"$/\"/g' /etc/cis-scanner/env_vars
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- sed -i 's/,$//g' /etc/cis-scanner/env_vars
 
 # CRITICAL: Delete the old file so we don't read stale data
 kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- rm -f /var/lib/google/cis_scanner_scan_result.textproto
@@ -221,12 +225,12 @@ for i in {1..15}; do
   sleep 2
 done
 
-# Grab the newly updated loaded count (it should be the same 117)
+# Grab the newly updated loaded count
 LOADED_L2_OPTIN=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- journalctl -u cis-level2.service | grep "Running scan of" | tail -n 1 | grep -o 'scan of [0-9]*' | awk '{print $3}')
 
 echo -e "\e[1;35m\n[ STAGE 3: LEVEL 2 WITH LOGGING OPTED-IN ]\e[0m"
 print_summary "$RAW_OPTIN" "$LOADED_L2_OPTIN"
-echo "Notice the 'Checks Skipped' count decreased, and 'Checks Evaluated' increased! The OS dynamically started fluent-bit to stay compliant."
+echo "Notice the 'Checks Skipped' count decreased, and 'Checks Evaluated' increased! The OS dynamically utilized fluent-bit to stay compliant."
 
 echo -e "\e[1;33mDemo complete!\e[0m"
 
