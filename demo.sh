@@ -153,11 +153,19 @@ spec:
           "
           sleep infinity
 EOF
+
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- rm -f /var/lib/google/cis_scanner_scan_result.textproto >/dev/null 2>&1
 kubectl apply -f cos-cis-enforcer.yaml 2>/dev/null
 
-echo -e "\e[1;34m[7/8] Waiting for DaemonSet to execute on all nodes (approx 30 seconds)....\e[0m"
+echo -e "\e[1;34m[7/8] Waiting for DaemonSet to execute on all nodes (approx 30 seconds)...\e[0m"
 kubectl rollout status daemonset/cos-cis-enforcer -n kube-system --timeout=120s >/dev/null 2>&1
-sleep 10 # Give systemd time to finish writing the file
+
+echo -e "\e[1;33m[ Waiting for Scanner to Finish (up to 15s) ]...\e[0m"
+for i in {1..15}; do
+  RAW_ENFORCED=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto 2>/dev/null || true)
+  if echo "$RAW_ENFORCED" | grep -q "SUCCEEDED"; then break; fi
+  sleep 2
+done
 
 echo -e "\e[1;34mChecking systemctl status for proof of execution...\e[0m"
 echo -e "\e[1;30m-------------------------------------------------------------\e[0m"
@@ -166,7 +174,6 @@ kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- sys
 echo -e "\e[1;30m-------------------------------------------------------------\e[0m"
 
 echo -e "\e[1;35m\n[ STAGE 2: ENFORCED RESULTS (CIS Level 2) ]\e[0m"
-RAW_ENFORCED=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto 2>/dev/null)
 print_summary "$RAW_ENFORCED"
 
 # ==============================================================================
@@ -175,15 +182,26 @@ print_summary "$RAW_ENFORCED"
 read -p $'\e[1;32mPress [ENTER] to remove the logging opt-out and demonstrate granular control...\e[0m'
 
 echo -e "\e[1;34mModifying /etc/cis-scanner/env_vars to remove logging exclusion...\e[0m"
-kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- \
-  sed -i 's/logging-service-running//g' /etc/cis-scanner/env_vars
+# Safely remove the string and clean up any dangling commas
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- bash -c "
+  sed -i 's/logging-service-running//g' /etc/cis-scanner/env_vars &&
+  sed -i 's/,,/,/g' /etc/cis-scanner/env_vars &&
+  sed -i 's/=, /=/g' /etc/cis-scanner/env_vars
+"
+
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- rm -f /var/lib/google/cis_scanner_scan_result.textproto
 
 echo -e "\e[1;34mTriggering cis-level2.service to apply changes and rescan...\e[0m"
-# CRITICAL FIX: Changed from `start` to `restart` to force the oneshot service to run again
 kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- systemctl restart cis-level2.service
 
+echo -e "\e[1;33m[ Waiting for Scanner to Finish (up to 15s) ]...\e[0m"
+for i in {1..15}; do
+  RAW_OPTIN=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto 2>/dev/null || true)
+  if echo "$RAW_OPTIN" | grep -q "SUCCEEDED"; then break; fi
+  sleep 2
+done
+
 echo -e "\e[1;35m\n[ STAGE 3: LEVEL 2 WITH LOGGING OPTED-IN ]\e[0m"
-RAW_OPTIN=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto 2>/dev/null)
 print_summary "$RAW_OPTIN"
 echo "Notice the 'Checks Evaluated' count increased! The OS dynamically started fluent-bit to stay compliant."
 
