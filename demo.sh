@@ -73,7 +73,7 @@ else
         --nat-all-subnet-ip-ranges --region=$REGION > /dev/null 2>&1
 fi
 
-echo -e "\e[1;34m[3/8] Checking GKE Cluster Status...\e[0m"
+echo -e "\e[1;34m[3/8] Checking GKE cluster status...\e[0m"
 CURRENT_IP=$(curl -s ifconfig.me)
 
 if gcloud container clusters describe $CLUSTER_NAME --zone=$ZONE --format="value(name)" >/dev/null 2>&1; then
@@ -92,7 +92,7 @@ else
       --master-ipv4-cidr 172.16.1.0/28 --enable-intra-node-visibility > /dev/null
 fi
 
-echo -e "\e[1;34m[4/8] Fetching Cluster Credentials...\e[0m"
+echo -e "\e[1;34m[4/8] Fetching cluster credentials...\e[0m"
 gcloud container clusters get-credentials $CLUSTER_NAME --zone "$ZONE" > /dev/null 2>&1
 
 echo -e "\e[1;34m[5/8] Deploying a temporary 'Reader' pod to interact with the OS...\e[0m"
@@ -119,7 +119,7 @@ kubectl wait --for=condition=Ready pod/cos-cis-reader -n kube-system --timeout=1
 # ==============================================================================
 # STAGE 1: BASELINE
 # ==============================================================================
-echo -e "\e[1;33m\n[ Waiting for Boot Scanner to Finish (up to 60s) ]...\e[0m"
+echo -e "\e[1;33m\n[ Waiting for Boot Scanner to finish (up to 60s) ]...\e[0m"
 for i in {1..30}; do
   RAW_BASELINE=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto 2>/dev/null || true)
   if echo "$RAW_BASELINE" | grep -q "SUCCEEDED"; then break; fi
@@ -127,32 +127,13 @@ for i in {1..30}; do
 done
 
 echo -e "\e[1;35m\n[ STAGE 1: DEFAULT BASELINE ]\e[0m"
-echo "By default, GKE COS images are configured for CIS Level 1 with logging opted-out."
+echo "By default, GKE COS images are configured for CIS Level 1."
 print_summary "$RAW_BASELINE"
 
 # ==============================================================================
-# STAGE 2: OPT-IN TO LOGGING
+# STAGE 2: ENFORCE LEVEL 2 (DEFAULT)
 # ==============================================================================
-read -p $'\e[1;32mPress [ENTER] to remove the logging opt-out and re-run the Level 1 scan...\e[0m'
-
-echo -e "\e[1;34mModifying /etc/cis-scanner/env_vars to remove logging exclusion...\e[0m"
-# Safely remove the specific opt-out string from the env file
-kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- \
-  sed -i 's/--benchmark-opt-out-ids=logging-service-running//g' /etc/cis-scanner/env_vars
-
-echo -e "\e[1;34mTriggering cis-level1.service to apply changes and rescan...\e[0m"
-# systemctl start is synchronous, so it will wait until the scan finishes
-kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- systemctl start cis-level1.service
-
-echo -e "\e[1;35m\n[ STAGE 2: LEVEL 1 WITH LOGGING OPTED-IN ]\e[0m"
-RAW_OPTIN=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto 2>/dev/null)
-print_summary "$RAW_OPTIN"
-echo "Notice the 'Checks Evaluated' count increased by 1!"
-
-# ==============================================================================
-# STAGE 3: ENFORCE LEVEL 2
-# ==============================================================================
-read -p $'\e[1;32mPress [ENTER] to deploy the DaemonSet, enforce CIS Level 2, and update the periodic scanner...\e[0m'
+read -p $'\e[1;32mPress [ENTER] to deploy the DaemonSet and enforce CIS Level 2...\e[0m'
 
 echo -e "\e[1;34m[6/8] Generating and applying the CIS Level 2 Enforcer DaemonSet...\e[0m"
 cat << 'EOF' > cos-cis-enforcer.yaml
@@ -193,14 +174,31 @@ echo -e "\e[1;34m[7/8] Waiting for DaemonSet to execute on all nodes (approx 30 
 kubectl rollout status daemonset/cos-cis-enforcer -n kube-system --timeout=120s >/dev/null 2>&1
 sleep 10 # Give systemd time to finish writing the file
 
-echo -e "\e[1;34m[8/8] Checking systemctl status for proof of execution...\e[0m"
+echo -e "\e[1;34mChecking systemctl status for proof of execution...\e[0m"
 echo -e "\e[1;30m-------------------------------------------------------------\e[0m"
 kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- systemctl status cis-level2.service --no-pager
 echo -e "\e[1;30m-------------------------------------------------------------\e[0m"
 
-echo -e "\e[1;35m\n[ STAGE 3: ENFORCED RESULTS (CIS LEVEL 2) ]\e[0m"
+echo -e "\e[1;35m\n[ STAGE 2: ENFORCED RESULTS (CIS Level 2) ]\e[0m"
 RAW_ENFORCED=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto 2>/dev/null)
 print_summary "$RAW_ENFORCED"
+
+# ==============================================================================
+# STAGE 3: GRANULAR CONTROL (OPTING-IN TO LOGGING)
+# ==============================================================================
+read -p $'\e[1;32mPress [ENTER] to remove the logging opt-out and demonstrate granular control...\e[0m'
+
+echo -e "\e[1;34mModifying /etc/cis-scanner/env_vars to remove logging exclusion...\e[0m"
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- \
+  sed -i 's/--benchmark-opt-out-ids=logging-service-running//g' /etc/cis-scanner/env_vars
+
+echo -e "\e[1;34mTriggering cis-level2.service to apply changes and rescan...\e[0m"
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- systemctl start cis-level2.service
+
+echo -e "\e[1;35m\n[ STAGE 3: LEVEL 2 WITH LOGGING OPTED-IN ]\e[0m"
+RAW_OPTIN=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto 2>/dev/null)
+print_summary "$RAW_OPTIN"
+echo "Notice the 'Checks Evaluated' count increased! The OS dynamically started fluent-bit to stay compliant."
 
 echo -e "\e[1;33mDemo complete!\e[0m"
 
