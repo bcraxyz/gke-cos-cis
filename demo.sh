@@ -6,6 +6,12 @@
 
 set -e
 
+cleanup() {
+  kubectl delete -f cos-cis-reader.yaml --ignore-not-found=true --wait=false >/dev/null 2>&1 || true
+  rm -f cos-cis-reader.yaml cos-cis-enforcer.yaml
+}
+trap cleanup EXIT
+
 REGION="asia-southeast1"
 ZONE="${REGION}-a"
 CLUSTER_NAME="cos-cis-cluster"
@@ -29,7 +35,7 @@ print_summary() {
   if [ -n "$loaded_checks" ] && [ "$loaded_checks" -gt "$evaluated" ]; then
     local skipped=$((loaded_checks - evaluated))
     echo -e "\e[1;37m Checks Loaded:    \e[1;34m$loaded_checks\e[0m"
-    echo -e "\e[1;37m Checks Skipped:   \e[1;33m$skipped  (IPv6 firewall checks)\e[0m"
+    echo -e "\e[1;37m Checks Skipped:   \e[1;33m$skipped\e[0m"
   fi
 
   echo -e "\e[1;37m Checks Evaluated: \e[1;32m$evaluated\e[0m"
@@ -151,7 +157,7 @@ kubectl delete -f cos-cis-reader.yaml --ignore-not-found=true --wait=false >/dev
 kubectl apply -f cos-cis-reader.yaml 2>/dev/null
 kubectl wait --for=condition=Ready pod/cos-cis-reader -n kube-system --timeout=120s >/dev/null 2>&1
 
-echo -e "\e[1;33m\n[ Waiting for Boot Scanner to finish (up to 60s) ]...\e[0m"
+echo -e "\e[1;33m\n[ Waiting for Scanner to finish (up to 60s) ]...\e[0m"
 STAGE1_START=$(date -u +"%Y-%m-%d %H:%M:%S")
 RAW_BASELINE=$(wait_for_scan 30)
 LOADED_L1=$(get_loaded_count "cis-level1.service" "$STAGE1_START")
@@ -222,5 +228,3 @@ echo -e "\e[1;35m\n[ STAGE 2: ENFORCED RESULTS ]\e[0m"
 print_summary "$RAW_ENFORCED" "$LOADED_L2" "CIS Level 2"
 
 echo -e "\e[1;33mDemo complete!\e[0m"
-
-kubectl delete -f cos-cis-reader.yaml --wait=false >/dev/null 2>&1
