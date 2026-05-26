@@ -205,13 +205,14 @@ kubectl exec -n kube-system cos-cis-reader -- \
   nsenter -t 1 -m -u -i -n -p -- \
   rm -f /var/lib/google/cis_scanner_scan_result.textproto >/dev/null 2>&1
 
+# Timestamp before apply — journal --since must cover the DaemonSet-triggered scan.
+STAGE2_START=$(date -u +"%Y-%m-%d %H:%M:%S")
 kubectl apply -f cos-cis-enforcer.yaml 2>/dev/null
 
 echo -e "\e[1;34m[7/8] Waiting for DaemonSet to execute on all nodes...\e[0m"
 kubectl rollout status daemonset/cos-cis-enforcer -n kube-system --timeout=120s >/dev/null 2>&1
 
 echo -e "\e[1;33m[ Waiting for Scanner to Finish (up to 30s) ]...\e[0m"
-STAGE2_START=$(date -u +"%Y-%m-%d %H:%M:%S")
 RAW_ENFORCED=$(wait_for_scan 15)
 
 echo -e "\e[1;34mProof of execution (cis-level2.service status):\e[0m"
@@ -233,19 +234,31 @@ print_summary "$RAW_ENFORCED" "$LOADED_L2" "CIS Level 2"
 read -p $'\e[1;32mPress [ENTER] to remove the logging opt-out and demonstrate granular control...\e[0m'
 
 echo -e "\e[1;34mRemoving logging-service-running from opt-out list in /etc/cis-scanner/env_vars...\e[0m"
-# Surgically remove only 'logging-service-running' from the comma-separated opt-out ID list.
-# Wiping EXTRA_OPTIONS entirely would also remove the IPv6 opt-outs and break the skipped count.
+# Surgically remove only logging-service-running from the opt-out list, handling three positions:
+#   middle:  ,logging-service-running,  -> remove ID and one comma
+#   leading: logging-service-running,   -> remove ID and trailing comma
+#   trailing/only: ,logging-service-running  -> remove preceding comma and ID
 kubectl exec -n kube-system cos-cis-reader -- \
   nsenter -t 1 -m -u -i -n -p -- \
-  sed -i 's/logging-service-running,\?//g' /etc/cis-scanner/env_vars
-# Clean up any double-comma or trailing comma left after removal.
-kubectl exec -n kube-system cos-cis-reader -- \
-  nsenter -t 1 -m -u -i -n -p -- \
-  sed -i 's/,,/,/g; s/,"/"/g' /etc/cis-scanner/env_vars
+  sed -i \
+    -e 's/,logging-service-running,/,/g' \
+    -e 's/logging-service-running,//g' \
+    -e 's/,logging-service-running//g' \
+    /etc/cis-scanner/env_vars
 
 kubectl exec -n kube-system cos-cis-reader -- \
   nsenter -t 1 -m -u -i -n -p -- \
   rm -f /var/lib/google/cis_scanner_scan_result.textproto
+
+# Print env_vars and service unit so any remaining opt-out issues are immediately visible.
+echo -e "\e[1;34mCurrent /etc/cis-scanner/env_vars after edit:\e[0m"
+kubectl exec -n kube-system cos-cis-reader -- \
+  nsenter -t 1 -m -u -i -n -p -- \
+  cat /etc/cis-scanner/env_vars
+echo -e "\e[1;34mcis-level2.service ExecStart:\e[0m"
+kubectl exec -n kube-system cos-cis-reader -- \
+  nsenter -t 1 -m -u -i -n -p -- \
+  systemctl cat cis-level2.service | grep -E "^ExecStart|EnvironmentFile|benchmark-opt-out"
 
 # Capture timestamp BEFORE restart so get_loaded_count is scoped to this scan only.
 STAGE3_START=$(date -u +"%Y-%m-%d %H:%M:%S")
