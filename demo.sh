@@ -30,7 +30,7 @@ gcloud compute routers create nat-router --network $NETWORK --region $REGION || 
 gcloud compute routers nats create nat-config \
     --router=nat-router \
     --auto-allocate-nat-external-ips \
-    --nat-all-subnet-ips-ranges \
+    --nat-all-subnet-ip-ranges \
     --region=$REGION || true
 
 echo -e "\e[1;34m[3/8] Creating GKE Cluster with COS & strong defaults...\e[0m"
