@@ -42,47 +42,83 @@ print_summary() {
 # -----------------------------------------------
 
 echo -e "\e[1;34m[1/8] Enabling required Google Cloud APIs...\e[0m"
-gcloud services enable container.googleapis.com compute.googleapis.com
+gcloud services enable container.googleapis.com compute.googleapis.com --quiet
 
 echo -e "\e[1;34m[2/8] Setting up VPC, Subnet, and Cloud NAT (Required for Private Nodes)...\e[0m"
-gcloud compute networks create $NETWORK --subnet-mode=custom || true
-gcloud compute networks subnets create $SUBNET \
-  --network=$NETWORK \
-  --region=$REGION \
-  --range=10.20.0.0/24 || true
 
-gcloud compute routers create nat-router --network $NETWORK --region $REGION || true
-gcloud compute routers nats create nat-config \
-    --router=nat-router \
-    --auto-allocate-nat-external-ips \
-    --nat-all-subnet-ip-ranges \
-    --region=$REGION || true
+# Create Network
+if gcloud compute networks describe $NETWORK --format="value(name)" 2>/dev/null; then
+    echo "  -> [INFO] Network '$NETWORK' already exists, skipping."
+else
+    gcloud compute networks create $NETWORK --subnet-mode=custom
+fi
 
-echo -e "\e[1;34m[3/8] Creating GKE Cluster with COS & strong defaults...\e[0m"
+# Create Subnet
+if gcloud compute networks subnets describe $SUBNET --region=$REGION --format="value(name)" 2>/dev/null; then
+    echo "  -> [INFO] Subnet '$SUBNET' already exists, skipping."
+else
+    gcloud compute networks subnets create $SUBNET \
+      --network=$NETWORK \
+      --region=$REGION \
+      --range=10.20.0.0/24
+fi
+
+# Create Router
+if gcloud compute routers describe nat-router --region=$REGION --format="value(name)" 2>/dev/null; then
+    echo "  -> [INFO] Router 'nat-router' already exists, skipping."
+else
+    gcloud compute routers create nat-router --network $NETWORK --region $REGION
+fi
+
+# Create NAT Config
+if gcloud compute routers nats describe nat-config --router=nat-router --region=$REGION --format="value(name)" 2>/dev/null; then
+    echo "  -> [INFO] NAT config 'nat-config' already exists, skipping."
+else
+    gcloud compute routers nats create nat-config \
+        --router=nat-router \
+        --auto-allocate-nat-external-ips \
+        --nat-all-subnet-ip-ranges \
+        --region=$REGION
+fi
+
+echo -e "\e[1;34m[3/8] Checking GKE Cluster Status...\e[0m"
+# Fetching current IP for Master Authorized Networks
 CURRENT_IP=$(curl -s ifconfig.me)
 
-gcloud container clusters create $CLUSTER_NAME \
-  --zone "$ZONE" \
-  --network "$NETWORK" \
-  --subnetwork "$SUBNET" \
-  --num-nodes 2 \
-  --image-type "COS_CONTAINERD" \
-  --release-channel stable \
-  --enable-network-policy \
-  --enable-shielded-nodes \
-  --shielded-integrity-monitoring \
-  --shielded-secure-boot \
-  --enable-private-nodes \
-  --enable-ip-alias \
-  --enable-master-authorized-networks \
-  --master-authorized-networks="${CURRENT_IP}/32" \
-  --master-ipv4-cidr 172.16.1.0/28 \
-  --enable-intra-node-visibility || true
+if gcloud container clusters describe $CLUSTER_NAME --zone=$ZONE --format="value(name)" 2>/dev/null; then
+    echo "  -> [INFO] Cluster '$CLUSTER_NAME' already exists, skipping creation."
+    
+    # Optional: Update the master authorized networks just in case the Cloud Shell IP changed
+    gcloud container clusters update $CLUSTER_NAME \
+      --zone "$ZONE" \
+      --enable-master-authorized-networks \
+      --master-authorized-networks="${CURRENT_IP}/32" \
+      --quiet > /dev/null 2>&1 || true
+else
+    echo "  -> [INFO] Creating new cluster (this will take several minutes)..."
+    gcloud container clusters create $CLUSTER_NAME \
+      --zone "$ZONE" \
+      --network "$NETWORK" \
+      --subnetwork "$SUBNET" \
+      --num-nodes 2 \
+      --image-type "COS_CONTAINERD" \
+      --release-channel stable \
+      --enable-network-policy \
+      --enable-shielded-nodes \
+      --shielded-integrity-monitoring \
+      --shielded-secure-boot \
+      --enable-private-nodes \
+      --enable-ip-alias \
+      --enable-master-authorized-networks \
+      --master-authorized-networks="${CURRENT_IP}/32" \
+      --master-ipv4-cidr 172.16.1.0/28 \
+      --enable-intra-node-visibility
+fi
 
 echo -e "\e[1;34m[4/8] Fetching Cluster Credentials...\e[0m"
 gcloud container clusters get-credentials $CLUSTER_NAME --zone "$ZONE"
 
-echo -e "\e[1;34m[5/8] Deploying a temporary 'Reader' pod to check the baseline (CIS Level 1)...\e[0m"
+echo -e "\e[1;34m[5/8] Deploying a temporary 'Reader' pod to check the baseline...\e[0m"
 cat << 'EOF' > cos-cis-reader.yaml
 apiVersion: v1
 kind: Pod
@@ -98,6 +134,9 @@ spec:
       privileged: true
     command: ["/bin/bash", "-c", "sleep infinity"]
 EOF
+
+# Ensure we have a clean slate if the pod was left running
+kubectl delete -f cos-cis-reader.yaml --ignore-not-found=true --wait=false &>/dev/null
 kubectl apply -f cos-cis-reader.yaml
 kubectl wait --for=condition=Ready pod/cos-cis-reader -n kube-system --timeout=120s
 
