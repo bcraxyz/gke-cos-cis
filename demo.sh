@@ -1,13 +1,13 @@
 #!/bin/bash
 
 # ==============================================================================
-# GKE COS CIS Level 1 & 2 Compliance Demo
+# GKE COS CIS Level 1 & 2 Compliance Demo (3-Stage)
 # ==============================================================================
 
 set -e
 
 # Configuration Variables
-PROJECT_ID=$(gcloud config get-value project)
+PROJECT_ID=$(gcloud config get-value project 2>/dev/null) 
 REGION="asia-southeast1"
 ZONE="${REGION}-a"
 CLUSTER_NAME="cos-cis-cluster"
@@ -30,7 +30,8 @@ print_summary() {
   echo -e "\e[1;36m             COMPLIANCE SUMMARY\e[0m"
   echo -e "\e[1;36m=============================================================\e[0m"
   echo -e "\e[1;37m Active Profile:   \e[1;32m$level Enforced\e[0m"
-  echo -e "\e[1;37m Checks Passed:    \e[1;32m$compliant / $total\e[0m"
+  echo -e "\e[1;37m Checks Evaluated: \e[1;32m$total\e[0m"
+  echo -e "\e[1;37m Checks Passed:    \e[1;32m$compliant\e[0m"
   
   if [ "$non_compliant" -eq 0 ]; then
       echo -e "\e[1;37m Checks Failed:    \e[1;32m0\e[0m"
@@ -42,83 +43,59 @@ print_summary() {
 # -----------------------------------------------
 
 echo -e "\e[1;34m[1/8] Enabling required Google Cloud APIs...\e[0m"
-gcloud services enable container.googleapis.com compute.googleapis.com --quiet
+gcloud services enable container.googleapis.com compute.googleapis.com > /dev/null 2>&1
 
-echo -e "\e[1;34m[2/8] Setting up VPC, Subnet, and Cloud NAT (Required for Private Nodes)...\e[0m"
-
-# Create Network
-if gcloud compute networks describe $NETWORK --format="value(name)" 2>/dev/null; then
+echo -e "\e[1;34m[2/8] Setting up VPC, Subnet, and Cloud NAT...\e[0m"
+if gcloud compute networks describe $NETWORK --format="value(name)" >/dev/null 2>&1; then
     echo "  -> [INFO] Network '$NETWORK' already exists, skipping."
 else
-    gcloud compute networks create $NETWORK --subnet-mode=custom
+    gcloud compute networks create $NETWORK --subnet-mode=custom > /dev/null 2>&1
 fi
 
-# Create Subnet
-if gcloud compute networks subnets describe $SUBNET --region=$REGION --format="value(name)" 2>/dev/null; then
+if gcloud compute networks subnets describe $SUBNET --region=$REGION --format="value(name)" >/dev/null 2>&1; then
     echo "  -> [INFO] Subnet '$SUBNET' already exists, skipping."
 else
     gcloud compute networks subnets create $SUBNET \
-      --network=$NETWORK \
-      --region=$REGION \
-      --range=10.20.0.0/24
+      --network=$NETWORK --region=$REGION --range=10.20.0.0/24 > /dev/null 2>&1
 fi
 
-# Create Router
-if gcloud compute routers describe nat-router --region=$REGION --format="value(name)" 2>/dev/null; then
+if gcloud compute routers describe nat-router --region=$REGION --format="value(name)" >/dev/null 2>&1; then
     echo "  -> [INFO] Router 'nat-router' already exists, skipping."
 else
-    gcloud compute routers create nat-router --network $NETWORK --region $REGION
+    gcloud compute routers create nat-router --network $NETWORK --region $REGION > /dev/null 2>&1
 fi
 
-# Create NAT Config
-if gcloud compute routers nats describe nat-config --router=nat-router --region=$REGION --format="value(name)" 2>/dev/null; then
+if gcloud compute routers nats describe nat-config --router=nat-router --region=$REGION --format="value(name)" >/dev/null 2>&1; then
     echo "  -> [INFO] NAT config 'nat-config' already exists, skipping."
 else
     gcloud compute routers nats create nat-config \
-        --router=nat-router \
-        --auto-allocate-nat-external-ips \
-        --nat-all-subnet-ip-ranges \
-        --region=$REGION
+        --router=nat-router --auto-allocate-nat-external-ips \
+        --nat-all-subnet-ip-ranges --region=$REGION > /dev/null 2>&1
 fi
 
 echo -e "\e[1;34m[3/8] Checking GKE Cluster Status...\e[0m"
-# Fetching current IP for Master Authorized Networks
 CURRENT_IP=$(curl -s ifconfig.me)
 
-if gcloud container clusters describe $CLUSTER_NAME --zone=$ZONE --format="value(name)" 2>/dev/null; then
+if gcloud container clusters describe $CLUSTER_NAME --zone=$ZONE --format="value(name)" >/dev/null 2>&1; then
     echo "  -> [INFO] Cluster '$CLUSTER_NAME' already exists, skipping creation."
-    
-    # Optional: Update the master authorized networks just in case the Cloud Shell IP changed
     gcloud container clusters update $CLUSTER_NAME \
-      --zone "$ZONE" \
-      --enable-master-authorized-networks \
-      --master-authorized-networks="${CURRENT_IP}/32" \
-      --quiet > /dev/null 2>&1 || true
+      --zone "$ZONE" --enable-master-authorized-networks \
+      --master-authorized-networks="${CURRENT_IP}/32" --quiet > /dev/null 2>&1 || true
 else
     echo "  -> [INFO] Creating new cluster (this will take several minutes)..."
     gcloud container clusters create $CLUSTER_NAME \
-      --zone "$ZONE" \
-      --network "$NETWORK" \
-      --subnetwork "$SUBNET" \
-      --num-nodes 2 \
-      --image-type "COS_CONTAINERD" \
-      --release-channel stable \
-      --enable-network-policy \
-      --enable-shielded-nodes \
-      --shielded-integrity-monitoring \
-      --shielded-secure-boot \
-      --enable-private-nodes \
-      --enable-ip-alias \
-      --enable-master-authorized-networks \
-      --master-authorized-networks="${CURRENT_IP}/32" \
-      --master-ipv4-cidr 172.16.1.0/28 \
-      --enable-intra-node-visibility
+      --zone "$ZONE" --network "$NETWORK" --subnetwork "$SUBNET" --num-nodes 2 \
+      --image-type "COS_CONTAINERD" --release-channel stable \
+      --enable-network-policy --enable-shielded-nodes --shielded-integrity-monitoring \
+      --shielded-secure-boot --enable-private-nodes --enable-ip-alias \
+      --enable-master-authorized-networks --master-authorized-networks="${CURRENT_IP}/32" \
+      --master-ipv4-cidr 172.16.1.0/28 --enable-intra-node-visibility > /dev/null
 fi
 
 echo -e "\e[1;34m[4/8] Fetching Cluster Credentials...\e[0m"
-gcloud container clusters get-credentials $CLUSTER_NAME --zone "$ZONE"
+gcloud container clusters get-credentials $CLUSTER_NAME --zone "$ZONE" > /dev/null 2>&1
 
-echo -e "\e[1;34m[5/8] Deploying a temporary 'Reader' pod to check the baseline...\e[0m"
+echo -e "\e[1;34m[5/8] Deploying a temporary 'Reader' pod to interact with the OS...\e[0m"
 cat << 'EOF' > cos-cis-reader.yaml
 apiVersion: v1
 kind: Pod
@@ -135,26 +112,46 @@ spec:
     command: ["/bin/bash", "-c", "sleep infinity"]
 EOF
 
-# Ensure we have a clean slate if the pod was left running
-kubectl delete -f cos-cis-reader.yaml --ignore-not-found=true --wait=false &>/dev/null
-kubectl apply -f cos-cis-reader.yaml
-kubectl wait --for=condition=Ready pod/cos-cis-reader -n kube-system --timeout=120s
+kubectl delete -f cos-cis-reader.yaml --ignore-not-found=true --wait=false >/dev/null 2>&1
+kubectl apply -f cos-cis-reader.yaml 2>/dev/null
+kubectl wait --for=condition=Ready pod/cos-cis-reader -n kube-system --timeout=120s >/dev/null 2>&1
 
+# ==============================================================================
+# STAGE 1: BASELINE
+# ==============================================================================
 echo -e "\e[1;33m\n[ Waiting for Boot Scanner to Finish (up to 60s) ]...\e[0m"
-# Loop until the file is written and contains "SUCCEEDED"
 for i in {1..30}; do
   RAW_BASELINE=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto 2>/dev/null || true)
-  if echo "$RAW_BASELINE" | grep -q "SUCCEEDED"; then
-    break
-  fi
+  if echo "$RAW_BASELINE" | grep -q "SUCCEEDED"; then break; fi
   sleep 2
 done
 
-echo -e "\e[1;33m\n[ BASELINE RESULTS ]\e[0m"
-echo "By default, GKE COS images are configured for CIS Level 1."
+echo -e "\e[1;35m\n[ STAGE 1: DEFAULT BASELINE ]\e[0m"
+echo "By default, GKE COS images are configured for CIS Level 1 with logging opted-out."
 print_summary "$RAW_BASELINE"
 
-# Wait for customer input
+# ==============================================================================
+# STAGE 2: OPT-IN TO LOGGING
+# ==============================================================================
+read -p $'\e[1;32mPress [ENTER] to remove the logging opt-out and re-run the Level 1 scan...\e[0m'
+
+echo -e "\e[1;34mModifying /etc/cis-scanner/env_vars to remove logging exclusion...\e[0m"
+# Safely remove the specific opt-out string from the env file
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- \
+  sed -i 's/--benchmark-opt-out-ids=logging-service-running//g' /etc/cis-scanner/env_vars
+
+echo -e "\e[1;34mTriggering cis-level1.service to apply changes and rescan...\e[0m"
+# systemctl start is synchronous, so it will wait until the scan finishes
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- systemctl start cis-level1.service
+
+echo -e "\e[1;35m\n[ STAGE 2: LEVEL 1 WITH LOGGING OPTED-IN ]\e[0m"
+RAW_OPTIN=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto 2>/dev/null)
+print_summary "$RAW_OPTIN"
+echo "Notice the 'Checks Evaluated' count increased by 1!"
+
+# ==============================================================================
+# STAGE 3: ENFORCE LEVEL 2
+# ==============================================================================
 read -p $'\e[1;32mPress [ENTER] to deploy the DaemonSet, enforce CIS Level 2, and update the periodic scanner...\e[0m'
 
 echo -e "\e[1;34m[6/8] Generating and applying the CIS Level 2 Enforcer DaemonSet...\e[0m"
@@ -190,17 +187,22 @@ spec:
           "
           sleep infinity
 EOF
-kubectl apply -f cos-cis-enforcer.yaml
+kubectl apply -f cos-cis-enforcer.yaml 2>/dev/null
 
 echo -e "\e[1;34m[7/8] Waiting for DaemonSet to execute on all nodes (approx 30 seconds)...\e[0m"
-kubectl rollout status daemonset/cos-cis-enforcer -n kube-system --timeout=120s
-sleep 15 # Give systemd time to configure the OS and run the new scan
+kubectl rollout status daemonset/cos-cis-enforcer -n kube-system --timeout=120s >/dev/null 2>&1
+sleep 10 # Give systemd time to finish writing the file
 
-echo -e "\e[1;33m\n[ ENFORCED RESULTS ]\e[0m"
-RAW_ENFORCED=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto)
+echo -e "\e[1;34m[8/8] Checking systemctl status for proof of execution...\e[0m"
+echo -e "\e[1;30m-------------------------------------------------------------\e[0m"
+kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- systemctl status cis-level2.service --no-pager
+echo -e "\e[1;30m-------------------------------------------------------------\e[0m"
+
+echo -e "\e[1;35m\n[ STAGE 3: ENFORCED RESULTS (CIS LEVEL 2) ]\e[0m"
+RAW_ENFORCED=$(kubectl exec -n kube-system cos-cis-reader -- nsenter -t 1 -m -u -i -n -p -- cat /var/lib/google/cis_scanner_scan_result.textproto 2>/dev/null)
 print_summary "$RAW_ENFORCED"
 
 echo -e "\e[1;33mDemo complete!\e[0m"
 
-# Cleanup the reader pod
-kubectl delete -f cos-cis-reader.yaml --wait=false &>/dev/null
+# Cleanup the reader pod quietly
+kubectl delete -f cos-cis-reader.yaml --wait=false >/dev/null 2>&1
