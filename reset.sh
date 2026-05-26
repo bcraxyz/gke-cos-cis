@@ -18,4 +18,6 @@ gcloud container clusters resize $CLUSTER_NAME --node-pool default-pool --num-no
 echo -e "\e[1;33m[3/3] Scaling node pool back to 2 (provisioning fresh VMs)...\e[0m"
 gcloud container clusters resize $CLUSTER_NAME --node-pool default-pool --num-nodes 2 --zone $ZONE --quiet
 
+rm -f cos-cis-reader.yaml cos-cis-enforcer.yaml
+
 echo -e "\e[1;32m\n✅ Cluster reset. Nodes are back to the default CIS Level 1 baseline.\e[0m"
