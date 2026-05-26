@@ -46,9 +46,10 @@ print_summary() {
 
 get_loaded_count() {
   local service="$1"
+  local since="$2"  # ISO timestamp — scopes the journal to this run only, avoiding stale Stage 2 entries in Stage 3
   kubectl exec -n kube-system cos-cis-reader -- \
     nsenter -t 1 -m -u -i -n -p -- \
-    journalctl -u "$service" --output=short-precise \
+    journalctl -u "$service" --since="$since" \
     | grep "Running scan of" | tail -n 1 \
     | grep -o 'scan of [0-9]*' | awk '{print $3}'
 }
@@ -76,32 +77,32 @@ echo -e "\e[1;34m[2/8] Setting up VPC, Subnet, and Cloud NAT...\e[0m"
 if ! gcloud compute networks describe $NETWORK --format="value(name)" >/dev/null 2>&1; then
   gcloud compute networks create $NETWORK --subnet-mode=custom > /dev/null 2>&1
 else
-  echo "  -> [INFO] Network '$NETWORK' already exists, skipping..."
+  echo "  -> [INFO] Network '$NETWORK' already exists, skipping."
 fi
 
 if ! gcloud compute networks subnets describe $SUBNET --region=$REGION --format="value(name)" >/dev/null 2>&1; then
   gcloud compute networks subnets create $SUBNET --network=$NETWORK --region=$REGION --range=10.20.0.0/24 > /dev/null 2>&1
 else
-  echo "  -> [INFO] Subnet '$SUBNET' already exists, skipping..."
+  echo "  -> [INFO] Subnet '$SUBNET' already exists, skipping."
 fi
 
 if ! gcloud compute routers describe nat-router --region=$REGION --format="value(name)" >/dev/null 2>&1; then
   gcloud compute routers create nat-router --network $NETWORK --region $REGION > /dev/null 2>&1
 else
-  echo "  -> [INFO] Router 'nat-router' already exists, skipping..."
+  echo "  -> [INFO] Router 'nat-router' already exists, skipping."
 fi
 
 if ! gcloud compute routers nats describe nat-config --router=nat-router --region=$REGION --format="value(name)" >/dev/null 2>&1; then
   gcloud compute routers nats create nat-config --router=nat-router --auto-allocate-nat-external-ips --nat-all-subnet-ip-ranges --region=$REGION > /dev/null 2>&1
 else
-  echo "  -> [INFO] NAT config 'nat-config' already exists, skipping..."
+  echo "  -> [INFO] NAT config 'nat-config' already exists, skipping."
 fi
 
-echo -e "\e[1;34m[3/8] Checking GKE cluster status...\e[0m"
+echo -e "\e[1;34m[3/8] Checking GKE Cluster Status...\e[0m"
 CURRENT_IP=$(curl -s ifconfig.me)
 
 if gcloud container clusters describe $CLUSTER_NAME --zone=$ZONE --format="value(name)" >/dev/null 2>&1; then
-  echo "  -> [INFO] Cluster '$CLUSTER_NAME' already exists, skipping..."
+  echo "  -> [INFO] Cluster '$CLUSTER_NAME' already exists, skipping creation."
   gcloud container clusters update $CLUSTER_NAME --zone "$ZONE" \
     --enable-master-authorized-networks \
     --master-authorized-networks="${CURRENT_IP}/32" \
@@ -127,7 +128,7 @@ else
     --enable-intra-node-visibility > /dev/null
 fi
 
-echo -e "\e[1;34m[4/8] Fetching cluster credentials...\e[0m"
+echo -e "\e[1;34m[4/8] Fetching Cluster Credentials...\e[0m"
 gcloud container clusters get-credentials $CLUSTER_NAME --zone "$ZONE" > /dev/null 2>&1
 
 echo -e "\e[1;34m[5/8] Deploying Reader pod...\e[0m"
@@ -154,8 +155,9 @@ kubectl wait --for=condition=Ready pod/cos-cis-reader -n kube-system --timeout=1
 # STAGE 1: BASELINE (CIS Level 1)
 # ==============================================================================
 echo -e "\e[1;33m\n[ Waiting for Boot Scanner to Finish (up to 60s) ]...\e[0m"
+STAGE1_START=$(date -u +"%Y-%m-%d %H:%M:%S")
 RAW_BASELINE=$(wait_for_scan 30)
-LOADED_L1=$(get_loaded_count "cis-level1.service")
+LOADED_L1=$(get_loaded_count "cis-level1.service" "$STAGE1_START")
 
 echo -e "\e[1;35m\n[ STAGE 1: DEFAULT BASELINE ]\e[0m"
 echo "GKE COS nodes comply with CIS Level 1 out of the box. The logging check is opted-out by default."
@@ -209,6 +211,7 @@ echo -e "\e[1;34m[7/8] Waiting for DaemonSet to execute on all nodes...\e[0m"
 kubectl rollout status daemonset/cos-cis-enforcer -n kube-system --timeout=120s >/dev/null 2>&1
 
 echo -e "\e[1;33m[ Waiting for Scanner to Finish (up to 30s) ]...\e[0m"
+STAGE2_START=$(date -u +"%Y-%m-%d %H:%M:%S")
 RAW_ENFORCED=$(wait_for_scan 15)
 
 echo -e "\e[1;34mProof of execution (cis-level2.service status):\e[0m"
@@ -219,7 +222,7 @@ kubectl exec -n kube-system cos-cis-reader -- \
   | grep -E 'Reading scan config|Running scan of|Scan status:|Found.*non-compliant|Writing scan results'
 echo -e "\e[1;30m-------------------------------------------------------------\e[0m"
 
-LOADED_L2=$(get_loaded_count "cis-level2.service")
+LOADED_L2=$(get_loaded_count "cis-level2.service" "$STAGE2_START")
 
 echo -e "\e[1;35m\n[ STAGE 2: ENFORCED RESULTS ]\e[0m"
 print_summary "$RAW_ENFORCED" "$LOADED_L2" "CIS Level 2"
@@ -230,13 +233,22 @@ print_summary "$RAW_ENFORCED" "$LOADED_L2" "CIS Level 2"
 read -p $'\e[1;32mPress [ENTER] to remove the logging opt-out and demonstrate granular control...\e[0m'
 
 echo -e "\e[1;34mRemoving logging-service-running from opt-out list in /etc/cis-scanner/env_vars...\e[0m"
+# Surgically remove only 'logging-service-running' from the comma-separated opt-out ID list.
+# Wiping EXTRA_OPTIONS entirely would also remove the IPv6 opt-outs and break the skipped count.
 kubectl exec -n kube-system cos-cis-reader -- \
   nsenter -t 1 -m -u -i -n -p -- \
-  sed -i 's/^EXTRA.*$/EXTRA_OPTIONS=""/' /etc/cis-scanner/env_vars
+  sed -i 's/logging-service-running,\?//g' /etc/cis-scanner/env_vars
+# Clean up any double-comma or trailing comma left after removal.
+kubectl exec -n kube-system cos-cis-reader -- \
+  nsenter -t 1 -m -u -i -n -p -- \
+  sed -i 's/,,/,/g; s/,"/"/g' /etc/cis-scanner/env_vars
 
 kubectl exec -n kube-system cos-cis-reader -- \
   nsenter -t 1 -m -u -i -n -p -- \
   rm -f /var/lib/google/cis_scanner_scan_result.textproto
+
+# Capture timestamp BEFORE restart so get_loaded_count is scoped to this scan only.
+STAGE3_START=$(date -u +"%Y-%m-%d %H:%M:%S")
 
 echo -e "\e[1;34mRestarting cis-level2.service (will auto-start fluent-bit and rescan)...\e[0m"
 kubectl exec -n kube-system cos-cis-reader -- \
@@ -245,12 +257,12 @@ kubectl exec -n kube-system cos-cis-reader -- \
 
 echo -e "\e[1;33m[ Waiting for Scanner to Finish (up to 30s) ]...\e[0m"
 RAW_OPTIN=$(wait_for_scan 15)
-LOADED_L2_OPTIN=$(get_loaded_count "cis-level2.service")
+LOADED_L2_OPTIN=$(get_loaded_count "cis-level2.service" "$STAGE3_START")
 
 echo -e "\e[1;35m\n[ STAGE 3: LEVEL 2 WITH LOGGING OPTED-IN ]\e[0m"
 echo "The logging check is now active. cis-level2.service auto-started fluent-bit to satisfy it."
 print_summary "$RAW_OPTIN" "$LOADED_L2_OPTIN" "CIS Level 2 (Logging Opted-In)"
-echo "Notice: 'Checks Skipped' decreased and 'Checks Evaluated' increased by 1."
+echo "Notice: 'Checks Skipped' decreased from 5 to 4, and 'Checks Evaluated' increased from 112 to 113."
 
 echo -e "\e[1;33mDemo complete!\e[0m"
 
